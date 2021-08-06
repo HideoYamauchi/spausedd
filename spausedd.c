@@ -48,6 +48,7 @@
 
 #define PROGRAM_NAME			"spausedd"
 
+/* 200msec */
 #define DEFAULT_TIMEOUT			200
 
 /*
@@ -600,9 +601,11 @@ poll_run(uint64_t timeout)
 	int poll_res;
 	int poll_timeout;
 	double steal_perc;
-
+        /* timeout(msec:デフォルト200ms)をnsec変換し、最大差分にセット */
 	tv_max_allowed_diff = timeout * NO_NS_IN_MSEC;
+        /* pollのタイマー時刻をtimeoutの1/3でセット */
 	poll_timeout = timeout / 3;
+        /* 開始時刻を取得 */
 	tv_start = nano_current_get();
 
 	log_printf(LOG_INFO, "Running main poll loop with maximum timeout %"PRIu64
@@ -612,6 +615,7 @@ poll_run(uint64_t timeout)
 		/*
 		 * Fetching stealtime can block so get it before monotonic time
 		 */
+                /* タイマー仕掛け前のStealと現在時間を保存 */
 		steal_prev = steal_now = nano_stealtime_get();
 		tv_prev = tv_now = nano_current_get();
 
@@ -629,7 +633,7 @@ poll_run(uint64_t timeout)
 		if (poll_timeout < 0) {
 			poll_timeout = 0;
 		}
-
+                /* poll_timeout(timoutの1/3)のタイマーを実行 */
 		poll_res = poll(NULL, 0, poll_timeout);
 		if (poll_res == -1) {
 			if (errno != EINTR) {
@@ -641,6 +645,8 @@ poll_run(uint64_t timeout)
 		/*
 		 * Fetching stealtime can block so first get monotonic and then steal time
 		 */
+                /*
+                /* タイマー発動後の時刻とStealを取得して、タイマー仕掛け前と差分を取得 */
 		tv_now = nano_current_get();
 		tv_diff = tv_now - tv_prev;
 
@@ -650,6 +656,8 @@ poll_run(uint64_t timeout)
 
 
 		if (tv_diff > tv_max_allowed_diff) {
+                        /* タイマーの差分がtimeout(デフォルト:200ms)より大きい場合にはログを出力 */
+                        /* timeout/3で仕掛けたタイマーがtimeoutよりも大きくなった場合 */
 			log_printf(LOG_ERR, "Not scheduled for %0.4fs (threshold is %0.4fs), "
 			    "steal time is %0.4fs (%0.2f%%)",
 			    (double)tv_diff / NO_NS_IN_SEC,
@@ -658,6 +666,8 @@ poll_run(uint64_t timeout)
 			    steal_perc);
 
 			if (steal_perc > max_steal_threshold) {
+                                /* Stealのpercが大きい場合にもログを出力 */
+                                /* max_steadl_thresholdは、10 or 100 */
 				log_printf(LOG_WARNING, "Steal time is > %0.1f%%, this is usually because "
 				    "of overloaded host machine", max_steal_threshold);
 			}
@@ -699,6 +709,7 @@ main(int argc, char **argv)
 	int silent;
 
 	foreground = 1;
+        /* デフォルト:200 */
 	timeout = DEFAULT_TIMEOUT;
 	set_prio = 1;
 	move_to_root_cgroup = MOVE_TO_ROOT_CGROUP_MODE_AUTO;
