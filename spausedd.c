@@ -55,8 +55,8 @@
  */
 #define MAX_TIMEOUT			(1000 * 60 * 60)
 
-#define DEFAULT_MAX_STEAL_THRESHOLD	10
-#define DEFAULT_MAX_STEAL_THRESHOLD_GL	100
+#define DEFAULT_MAX_STEAL_THRESHOLD	10  /* vSphere環境以外の閾値 */
+#define DEFAULT_MAX_STEAL_THRESHOLD_GL	100 /* vSphere環境の閾値 */
 
 #define NO_NS_IN_SEC			1000000000ULL
 #define NO_NS_IN_MSEC			1000000ULL
@@ -460,6 +460,7 @@ nano_stealtime_kernel_get(void)
  * Get steal time provided by vmguestlib
  */
 #ifdef HAVE_VMGUESTLIB
+/* vSphere SDKの場合 */
 static uint64_t
 nano_stealtime_vmguestlib_get(void)
 {
@@ -469,6 +470,12 @@ nano_stealtime_vmguestlib_get(void)
 	uint64_t used_ms, elapsed_ms;
 	static uint64_t prev_stolen_ms, prev_used_ms, prev_elapsed_ms;
 
+	/*
+          仮想マシンに関する情報を更新します。この情報はVMGuestLibHandleに関連付けられています。
+          VMGuestLib_UpdateInfoは、システムコールと同様のCPUリソースを必要とするため、パフォーマンスに影響を与える可能性があります。パフォーマンスが心配な場合は、VMGuestLib_UpdateInfoへの呼び出しの数を最小限に抑えてください。
+
+          プログラムが複数のスレッドを使用する場合、各スレッドは異なるハンドルを使用する必要があります。それ以外の場合は、更新呼び出しの周りにロックスキームを実装する必要があります。vSphere Guest APIは、ハンドルを使用したアクセスに関する内部ロックを実装していません。
+	*/
 	gl_err = VMGuestLib_UpdateInfo(guestlib_handle);
 	if (gl_err != VMGUESTLIB_ERROR_SUCCESS) {
 		log_printf(LOG_WARNING, "Can't update stolen time from guestlib: %s",
@@ -476,7 +483,7 @@ nano_stealtime_vmguestlib_get(void)
 
 		return (0);
 	}
-
+        /* 仮想マシンが準備完了状態（実行状態に移行可能）であったが、実行がスケジュールされていなかったミリ秒数を取得 */
 	gl_err = VMGuestLib_GetCpuStolenMs(guestlib_handle, &stolen_ms);
 	if (gl_err != VMGUESTLIB_ERROR_SUCCESS) {
 		log_printf(LOG_WARNING, "Can't get stolen time from guestlib: %s",
@@ -489,7 +496,13 @@ nano_stealtime_vmguestlib_get(void)
 	 * For debug purpose, returned errors ignored
 	 */
 	used_ms = elapsed_ms = 0;
+        /*
+        仮想マシンがCPUを使用したミリ秒数を取得します。この値には、ゲストオペレーティングシステムによって使用された時間と、この仮想マシンのタスクの仮想化コードによって使用された時間が含まれます。この値を経過時間（VMGuestLib_GetElapsedMs）と組み合わせて、仮想マシンの実効CPU速度を見積もることができます。この値はelapsedMsのサブセットです。 
+        */
 	(void)VMGuestLib_GetCpuUsedMs(guestlib_handle, &used_ms);
+        /* 
+        仮想マシンがサーバー上で最後に実行を開始してから経過したミリ秒数を取得します。経過時間のカウントは、仮想マシンの電源がオンになるか、再開されるか、VMotionを使用して移行されるたびに再開されます。この値は、仮想マシンがその時間中に処理能力を使用しているかどうかに関係なく、ミリ秒をカウントします。この値を仮想マシンが使用するCPU時間（VMGuestLib_GetCpuUsedMs）と組み合わせて、仮想マシンの実効CPU速度を見積もることができます。cpuUsedMSは、この値のサブセットです
+        */
 	(void)VMGuestLib_GetElapsedMs(guestlib_handle, &elapsed_ms);
 
 	log_printf(LOG_TRACE, "nano_stealtime_vmguestlib_get stats: "
@@ -537,8 +550,12 @@ static void
 guestlib_init(void)
 {
 #ifdef HAVE_VMGUESTLIB
+/* vSphere SDKの場合 */
 	VMGuestLibError gl_err;
 
+	/*
+他のvSphereGuestAPI関数で使用するためのハンドルを取得します。ゲストライブラリハンドルは、仮想マシンに関する情報にアクセスするためのコンテキストを提供します。仮想マシンの統計と状態データは特定のゲストライブラリハンドルに関連付けられているため、1つのハンドルを使用しても、別のハンドルに関連付けられているデータには影響しません。
+	*/
 	gl_err = VMGuestLib_OpenHandle(&guestlib_handle);
 	if (gl_err != VMGUESTLIB_ERROR_SUCCESS) {
 		log_printf(LOG_DEBUG, "Can't open guestlib handle: %s", VMGuestLib_GetErrorText(gl_err));
@@ -550,6 +567,7 @@ guestlib_init(void)
 	use_vmguestlib_stealtime = 1;
 
 	if (!max_steal_threshold_user_set) {
+//オプションなし時のデフォルト閾値:100
 		max_steal_threshold = DEFAULT_MAX_STEAL_THRESHOLD_GL;
 	}
 #endif
@@ -562,6 +580,9 @@ guestlib_fini(void)
 	VMGuestLibError gl_err;
 
 	if (use_vmguestlib_stealtime) {
+		/*
+			VMGuestLib_OpenHandleで取得したハンドルを解放します。
+		*/
 		gl_err = VMGuestLib_CloseHandle(guestlib_handle);
 
 		if (gl_err != VMGUESTLIB_ERROR_SUCCESS) {
@@ -601,6 +622,7 @@ poll_run(uint64_t timeout)
 	int poll_timeout;
 	double steal_perc;
 
+        /* チェック差分、pollタイマー時間、開始nano時間の取得 */
 	tv_max_allowed_diff = timeout * NO_NS_IN_MSEC;
 	poll_timeout = timeout / 3;
 	tv_start = nano_current_get();
@@ -612,6 +634,7 @@ poll_run(uint64_t timeout)
 		/*
 		 * Fetching stealtime can block so get it before monotonic time
 		 */
+                /* 開始時のsteal,nano時間の取得 */
 		steal_prev = steal_now = nano_stealtime_get();
 		tv_prev = tv_now = nano_current_get();
 
@@ -629,7 +652,7 @@ poll_run(uint64_t timeout)
 		if (poll_timeout < 0) {
 			poll_timeout = 0;
 		}
-
+		/* デフォルト200ms/3=66msのタイマーの実行 */
 		poll_res = poll(NULL, 0, poll_timeout);
 		if (poll_res == -1) {
 			if (errno != EINTR) {
@@ -641,15 +664,18 @@ poll_run(uint64_t timeout)
 		/*
 		 * Fetching stealtime can block so first get monotonic and then steal time
 		 */
+                /* タイマー完了nano時間の取得と、差分の計算 */
 		tv_now = nano_current_get();
 		tv_diff = tv_now - tv_prev;
-
+		/* タイマー完了stealの取得　*/
 		steal_now = nano_stealtime_get();
 		steal_diff = steal_now - steal_prev;
+                /* steal差分/nano差分 */
 		steal_perc = ((double)steal_diff / tv_diff) * (double)100;
 
-
+//log_printf(LOG_INFO, "max_steal_threshold : %0.1f%%", max_steal_threshold);
 		if (tv_diff > tv_max_allowed_diff) {
+			/* タイマーの経過時間が200msを超えた場合 */
 			log_printf(LOG_ERR, "Not scheduled for %0.4fs (threshold is %0.4fs), "
 			    "steal time is %0.4fs (%0.2f%%)",
 			    (double)tv_diff / NO_NS_IN_SEC,
@@ -658,6 +684,7 @@ poll_run(uint64_t timeout)
 			    steal_perc);
 
 			if (steal_perc > max_steal_threshold) {
+                                /* nano単位でのsteal差分が閾値を超えた場合は、steal差分も出力 */
 				log_printf(LOG_WARNING, "Steal time is > %0.1f%%, this is usually because "
 				    "of overloaded host machine", max_steal_threshold);
 			}
@@ -785,7 +812,7 @@ main(int argc, char **argv)
 	signal_handlers_register();
 
 	guestlib_init();
-
+	/* タイマー実行ループ */
 	poll_run(timeout);
 
 	guestlib_fini();
